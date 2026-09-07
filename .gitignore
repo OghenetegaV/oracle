@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+output_json/
+output_dxf/
+output_dwg/
+output_staad/
+output_lisp/
+logs/
+input_dwgs/*.dwl
+input_dwgs/*.dwl2

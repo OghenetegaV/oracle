@@ -1,0 +1,132 @@
+{
+  "standard_name": "Company RC Detailing Standards",
+  "reference_code": "BS 8110-1:1997 / BS 4466 & BS 8666 (bar bending) / BS 4449 (reinforcement)",
+  "source": {
+    "documents": [
+      "BS 8110-1:1997",
+      "BS 4466 / BS 8666:2005",
+      "BS 4449",
+      "Compiled_Structural_Drawings.pdf (24 pages)"
+    ]
+  },
+  "materials": {
+    "concrete_grade": "C25/30 (fcu = 25 N/mm^2 at 28 days)",
+    "bar_types": {
+      "R": "Mild steel, fy = 250 N/mm^2, per BS 4449",
+      "T": "High-tensile/high-yield deformed steel, fy = 410 N/mm^2, per BS 4449",
+      "Y": "Alternative prefix used for high-yield bars in this company's bending schedules (interchangeable with T; source drawings use both)"
+    },
+    "default_bar_prefix": "Y",
+    "notes": "Source drawings define T=high tensile in the general notes legend but the actual bending schedules (columns, beams, slabs) predominantly label bars with the 'Y' prefix (e.g. Y10, Y16, Y25). Oracle generates marks using 'Y' to match the schedules."
+  },
+  "bar_mark_format": {
+    "pattern": "[Qty][Y][Diameter]-[SerialMark][-Spacing]-([MemberRef])",
+    "legend": {
+      "Qty": "Number of bars of this exact shape (diameter + length + bend), e.g. 4",
+      "Y": "Bar type prefix (Y = high-yield, per company convention; R = mild steel)",
+      "Diameter": "Bar diameter in mm, e.g. 16",
+      "SerialMark": "Running serial number assigned once per distinct bar shape within a schedule (columns or beams), not the member name. Reused wherever that exact shape recurs.",
+      "Spacing": "Center-to-center spacing in mm, present only for links/stirrups",
+      "MemberRef": "Member(s) this shape belongs to, e.g. C1, or B1T/B1B for beam top/bottom, appended for traceability since Oracle has no separate per-member elevation drawing"
+    },
+    "examples": [
+      "2Y16-41-(B1T)",
+      "3Y16-42-(B1B)",
+      "20Y10-3-200-(B1)",
+      "4Y16-1-(C1)"
+    ],
+    "reference_note": "Observed job convention from source drawings: '2Y16-41', '3Y25-49', '50Y12-54-200-(B1)'. The general-notes legend example ('46 T 12 01 150 (T)') uses [No.of bars][Type][Dia][Mark][Spacing][Location] with spaces; Oracle follows the hyphenated schedule convention instead since it is what the actual BBS tables use."
+  },
+  "cover_requirements_mm": {
+    "foundation_slab_beam": 50,
+    "external_column": 40,
+    "internal_column": 40,
+    "external_beams_slabs": 25,
+    "internal_beams_slabs_stairs": 25,
+    "notes": "Per source drawings note 7: substructure (foundation slab & beam) = 50mm; superstructure external column = 40mm, external beams & slabs = 25mm; superstructure internal column = 40mm, internal beams/slabs/stairs = 25mm. Column cover and beam/slab cover do not actually differ between internal and external in this standard -- the split is kept for traceability/documentation."
+  },
+  "bar_weight_kg_per_m": {
+    "Y10": 0.617,
+    "Y12": 0.888,
+    "Y16": 1.578,
+    "Y20": 2.47,
+    "Y25": 3.86,
+    "notes": "Values confirmed against the source drawings' own bar bending schedule footers (pages 5, 7, 9, 15, 19, 24). Diameters not listed here are computed at runtime using w = d^2 / 162 kg/m (BS 4449 unit-weight formula for high-yield deformed bars, density 7850 kg/m^3)."
+  },
+  "bbs_table_columns": {
+    "column_schedule": [
+      "COLUMN",
+      "BM",
+      "SIZE",
+      "No. of bars",
+      "No. Thus",
+      "Total No.",
+      "Length (mm)",
+      "FORM",
+      "TOTAL LENGTH (m) by diameter"
+    ],
+    "beam_schedule": [
+      "NO",
+      "SIZE",
+      "QUA",
+      "Length (mm)",
+      "FORM",
+      "TOTAL LENGTH (m) by diameter"
+    ],
+    "footer": [
+      "SIZE",
+      "UNIT WEIGHT (kg/m)",
+      "LENGTH (m)",
+      "T.WEIGHT (kg)"
+    ],
+    "notes": "Matches the column table layout (page 7) and beam/slab quantity-takeoff layout (pages 5, 9, 15, 19, 24) of the source drawings. 'No. Thus' (count of identical repeated members of a type) is always 1 in Oracle's current GA model since each column/beam is generated as a unique instance rather than a repeated type."
+  },
+  "loading": {
+    "reference_code": "BS 6399-1:1996 (dead & imposed loads for buildings), BS 8110-1:1997 cl 2.4.3 (load combinations)",
+    "concrete_unit_weight_kn_m3": 24,
+    "finishes_kn_m2": 1.5,
+    "imposed_load_kn_m2": 2.5,
+    "imposed_load_basis": "BS 6399-1:1996 Table 1 -- chosen by the engineer during setup as 'Offices (general use)'.",
+    "uls_combination": "1.4 Gk + 1.6 Qk (BS 8110-1:1997 cl 2.4.3, dead + imposed only)",
+    "not_modeled": "BS 6399-2:1997 (wind loads) and BS 6399-3:1988 (roof imposed loads) are not implemented. The mock analysis (staad_mock.py) is gravity-only (dead + imposed on suspended floors); no lateral (wind/seismic) load case exists anywhere in Oracle yet."
+  },
+  "structural_steel": {
+    "reference_code": "BS 5950-1:2000 (structural use of steelwork in building)",
+    "grades": {
+      "S275": {
+        "fy_n_mm2": 275,
+        "notes": "fy for thickness <= 16mm per BS EN 10025-2; steps down for thicker sections per BS 5950-1 Table 9."
+      },
+      "S355": {
+        "fy_n_mm2": 355,
+        "notes": "fy for thickness <= 16mm per BS EN 10025-2; steps down for thicker sections per BS 5950-1 Table 9."
+      }
+    },
+    "default_grade": "S275",
+    "section_ranges": {
+      "columns": [
+        "UC 152x152x23",
+        "UC 203x203x46",
+        "UC 203x203x60",
+        "UC 254x254x73",
+        "UC 254x254x89",
+        "UC 305x305x97",
+        "UC 305x305x118"
+      ],
+      "beams": [
+        "UB 178x102x19",
+        "UB 203x133x25",
+        "UB 254x146x31",
+        "UB 305x165x40",
+        "UB 356x171x51",
+        "UB 406x178x60",
+        "UB 457x191x67"
+      ]
+    },
+    "design_notes": "Simplified BS 5950-1 sizing only: moment capacity Mc = py*Sx (or py*Zx for slender sections), shear capacity Pv = 0.6*py*Av, using standard SCI 'Blue Book' section properties for the chosen serial size. Lateral-torsional buckling, deflection, connection design, and local buckling classification are not modeled -- treat output as initial sizing to be verified by a competent engineer before construction, same caveat as the RC design path.",
+    "not_modeled": "Composite action with concrete slabs, fire protection thickness, and BS 5950-1 Part 3/4 (composite/cold-formed) are out of scope."
+  },
+  "detailing_limitations": {
+    "notes": "Oracle does not currently model BS 8666 bend shape codes, hook/bend-point geometry, starter bars, kickers, or laps. Main bars are treated as straight lengths (storey height for columns, span for beams); links/stirrups use an approximate closed-rectangle perimeter plus a generic hook allowance. The 'FORM' column in generated schedules is a text description, not a dimensioned bend sketch."
+  }
+}

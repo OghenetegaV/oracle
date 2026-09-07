@@ -1,0 +1,13 @@
+# Oracle -- Python dependencies
+#
+# Install with:  pip install -r requirements.txt
+#
+# All of these are required to run the wizard (oracle_wizard.py) and generate
+# a detail drawing. pywin32 is only exercised if you choose "Use STAAD.Pro"
+# in Step 5 -- everything else works without it, using the built-in quick
+# estimate instead.
+
+ezdxf>=1.4
+anthropic>=0.40
+matplotlib>=3.8
+pywin32>=306; sys_platform == "win32"
