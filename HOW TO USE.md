@@ -80,6 +80,22 @@ Step 5 — the rest of the wizard works exactly the same either way.
    bar bending schedule) and saves it as a DWG. Click "Open the folder" to
    find it.
 
+## Two things available from any step, not just in the flow
+
+Once a layout exists (after Step 4), two buttons appear in the top-right corner:
+
+- **📝 Layout & Notes** — opens a clickable plan of your layout. Click any
+  column, beam, or slab to attach a note to it specifically ("thicken this
+  slab", "double-check this column"). Elements with a note show a small
+  orange dot. Notes are applied the next time you regenerate the layout or
+  the design — add them whenever you think of them, you don't need to be on
+  a particular step.
+- **💬 Ask Claude** — a persistent chat window. Ask questions about the
+  project as it stands (Claude can see what's been generated so far) or type
+  instructions directly — anything you say here is also carried forward into
+  later layout/design generation, the same way the Step 3 notes box and
+  per-element notes are.
+
 ## Where things get saved
 
 Everything lands inside the Oracle folder:
