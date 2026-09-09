@@ -355,22 +355,40 @@ class Wizard(tk.Tk):
 
         win = tk.Toplevel(self)
         win.title("Ask Claude")
-        win.geometry("480x600")
+        win.geometry("500x640")
+        win.configure(bg=COLOR_BG)
         win.protocol("WM_DELETE_WINDOW", win.withdraw)  # hide, don't destroy -- keeps history alive
         self.chat_window = win
 
-        tk.Label(win, text="Ask Claude anything about this project", font=FONT_SUBTITLE,
-                 bg=COLOR_BG).pack(anchor="w", padx=15, pady=(15, 0))
-        tk.Label(win, font=FONT_SMALL, fg=COLOR_MUTED, bg=COLOR_BG, wraplength=450, justify="left",
-                 text="Claude can see what's been generated so far. Anything you say here is also "
-                      "kept as project context for later steps.").pack(anchor="w", padx=15, pady=(0, 10))
+        header = tk.Frame(win, bg=COLOR_BG)
+        header.pack(fill="x", padx=15, pady=(15, 0))
+        tk.Label(header, text="Ask Claude anything about this project", font=FONT_SUBTITLE,
+                 bg=COLOR_BG).pack(side="left")
+        tk.Button(header, text="View log file", command=self._open_log_file, font=FONT_SMALL,
+                  relief="flat", padx=8, pady=2, cursor="hand2").pack(side="right")
+        tk.Label(win, font=FONT_SMALL, fg=COLOR_MUTED, bg=COLOR_BG, wraplength=460, justify="left",
+                 text="Claude can see what's been generated so far, plus recent errors and log "
+                      "entries -- ask it to help troubleshoot something that went wrong. Anything "
+                      "you say here also carries forward into later layout/design steps.").pack(
+            anchor="w", padx=15, pady=(4, 10))
 
         self.chat_history_text = tk.Text(win, state="disabled", wrap="word", font=FONT_BODY,
-                                          bg="white", relief="solid", borderwidth=1)
+                                          bg="white", relief="solid", borderwidth=1, padx=4, pady=4,
+                                          cursor="arrow")
         self.chat_history_text.pack(fill="both", expand=True, padx=15, pady=(0, 10))
-        self.chat_history_text.tag_configure("user", foreground="#111827", font=("Segoe UI", 10, "bold"))
-        self.chat_history_text.tag_configure("claude", foreground="#1f6feb")
-        self.chat_history_text.tag_configure("pending", foreground=COLOR_MUTED)
+        # Bubble-style paragraphs: a colored background block per speaker, not just
+        # colored text, so a message's origin is obvious at a glance.
+        self.chat_history_text.tag_configure(
+            "user_bubble", background="#e0e7ff", lmargin1=8, lmargin2=8, rmargin=70,
+            spacing1=6, spacing3=10, wrap="word")
+        self.chat_history_text.tag_configure(
+            "claude_bubble", background="#dbeafe", lmargin1=70, lmargin2=70, rmargin=8,
+            spacing1=6, spacing3=10, wrap="word")
+        self.chat_history_text.tag_configure(
+            "user_speaker", foreground="#3730a3", font=("Segoe UI", 9, "bold"))
+        self.chat_history_text.tag_configure(
+            "claude_speaker", foreground="#1e40af", font=("Segoe UI", 9, "bold"))
+        self.chat_history_text.tag_configure("pending", foreground=COLOR_MUTED, font=("Segoe UI", 9, "italic"))
 
         input_row = tk.Frame(win, bg=COLOR_BG)
         input_row.pack(fill="x", padx=15, pady=(0, 15))
@@ -383,6 +401,15 @@ class Wizard(tk.Tk):
 
         self._render_chat_history()
 
+    def _open_log_file(self):
+        try:
+            from oracle_log import LOG_PATH
+            if not LOG_PATH.exists():
+                LOG_PATH.write_text("(no log entries yet)\n", encoding="utf-8")
+            os.startfile(LOG_PATH)
+        except Exception as e:
+            messagebox.showerror("Couldn't open log", str(e))
+
     def _on_chat_send_keypress(self, event):
         if not (event.state & 0x0001):  # plain Enter sends; Shift+Enter inserts a newline
             self._send_chat_message()
@@ -393,10 +420,13 @@ class Wizard(tk.Tk):
         t.config(state="normal")
         t.delete("1.0", "end")
         for msg in self.chat_messages:
-            tag = "user" if msg["role"] == "user" else "claude"
-            speaker = "You: " if msg["role"] == "user" else "Claude: "
-            t.insert("end", speaker, tag)
-            t.insert("end", msg["content"] + "\n\n")
+            is_user = msg["role"] == "user"
+            bubble = "user_bubble" if is_user else "claude_bubble"
+            speaker_tag = "user_speaker" if is_user else "claude_speaker"
+            speaker = "You" if is_user else "Claude"
+            t.insert("end", f"{speaker}\n", (speaker_tag, bubble))
+            t.insert("end", f"{msg['content']}\n", (bubble,))
+            t.insert("end", "\n")
         t.config(state="disabled")
         t.see("end")
 
@@ -420,7 +450,15 @@ class Wizard(tk.Tk):
         if self.data["element_notes"]:
             lines.append("Existing per-element notes: " +
                          "; ".join(f"{k}: {v}" for k, v in self.data["element_notes"].items()))
-        return "\n".join(lines) if lines else "Nothing generated yet -- the engineer is still at the start of the wizard."
+        summary = "\n".join(lines) if lines else "Nothing generated yet -- the engineer is still at the start of the wizard."
+
+        from oracle_log import read_recent_log
+        recent_log = read_recent_log(max_chars=3000)
+        if recent_log:
+            summary += ("\n\nRECENT LOG ENTRIES (Claude API retries, JSON parse failures, and errors "
+                        "shown to the engineer -- use these to help troubleshoot if asked "
+                        "\"why did that fail\" or similar):\n" + recent_log)
+        return summary
 
     def _combined_engineer_notes(self):
         """The Step 3 free-text box plus anything typed into the persistent chat --
@@ -572,6 +610,11 @@ class Wizard(tk.Tk):
 
     def default_error_handler(self, exc, tb):
         friendly = str(exc) or exc.__class__.__name__
+        try:
+            from oracle_log import log_event
+            log_event("wizard.error_shown_to_user", f"{friendly}\n{tb}")
+        except Exception:
+            pass  # logging must never be why an error dialog fails to show
         box = tk.Toplevel(self)
         box.title("We hit a problem")
         box.geometry("560x360")

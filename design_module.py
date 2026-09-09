@@ -2,9 +2,21 @@
 import json
 from pathlib import Path
 from config import OUTPUT_JSON_DIR, get_api_key
+from oracle_log import log_event, LOG_PATH
 import anthropic
 
 ANTHROPIC_API_KEY = get_api_key()
+
+
+def _strip_json_fences(text):
+    text = text.strip()
+    if text.startswith("```json"):
+        text = text[7:]
+    elif text.startswith("```"):
+        text = text[3:]
+    if text.endswith("```"):
+        text = text[:-3]
+    return text.strip()
 
 def load_forces(json_file="staad_results.json"):
     """Load forces from mock Staad analysis"""
@@ -169,10 +181,15 @@ OUTPUT ONLY THIS JSON (repeat the pattern below for every column/beam listed abo
 
     return prompt
 
-def call_claude_design(prompt):
-    """Call Claude for element design. Raises on failure instead of swallowing the
-    real error into a print() -- under the GUI wizard (pythonw, no console) a
-    swallowed print is invisible to everyone, caller included."""
+def call_claude_design(prompt, max_attempts=3, max_tokens=8000):
+    """Call Claude for element design. Automatically retries with a corrective
+    follow-up if the reply isn't valid JSON -- truncation or a formatting slip
+    is the single most common failure mode for structured LLM output, and not
+    worth surfacing to the user on the first occurrence. Every failed
+    attempt's FULL raw response is logged to logs/oracle.log (not just a
+    short preview), so a persistent failure can actually be diagnosed.
+    Returns raw text that is already confirmed to parse as JSON -- by the
+    time save_design() sees it, re-parsing is just a formality."""
 
     if not ANTHROPIC_API_KEY:
         raise RuntimeError(
@@ -181,27 +198,56 @@ def call_claude_design(prompt):
         )
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=120.0)
+    messages = [{"role": "user", "content": prompt}]
+    last_error = None
 
-    print("Calling Claude for element design...")
+    for attempt in range(1, max_attempts + 1):
+        print(f"Calling Claude for element design (attempt {attempt}/{max_attempts})...")
+        try:
+            message = client.messages.create(model="claude-sonnet-5", max_tokens=max_tokens, messages=messages)
+        except Exception as e:
+            log_event("design.api_error", f"attempt {attempt}/{max_attempts}: {e}")
+            raise RuntimeError(f"Couldn't reach Claude for the element design: {e}") from e
 
-    try:
-        message = client.messages.create(
-            model="claude-sonnet-5",
-            max_tokens=4000,
-            messages=[
-                {"role": "user", "content": prompt}
+        text = next((b.text for b in message.content if hasattr(b, "text") and b.text), None)
+        if not text:
+            last_error = f"empty reply (stop_reason={message.stop_reason!r})"
+            log_event("design.empty_reply", f"attempt {attempt}/{max_attempts}: stop_reason={message.stop_reason!r}")
+            messages += [
+                {"role": "assistant", "content": "(empty reply)"},
+                {"role": "user", "content": "That reply had no content. Please resend the complete JSON design."},
             ]
-        )
-    except Exception as e:
-        raise RuntimeError(f"Couldn't reach Claude for the element design: {e}") from e
+            continue
 
-    for block in message.content:
-        if hasattr(block, 'text') and block.text:
-            return block.text
+        cleaned = _strip_json_fences(text)
+        try:
+            json.loads(cleaned)
+            return text
+        except json.JSONDecodeError as e:
+            last_error = e
+            log_event(
+                "design.invalid_json",
+                f"attempt {attempt}/{max_attempts}, stop_reason={message.stop_reason!r}, error={e}\n"
+                f"FULL RAW RESPONSE:\n{text}",
+            )
+            if attempt == max_attempts:
+                break
+            hint = (
+                " Your reply was cut off before it finished -- keep the summary text brief this time "
+                "so the full JSON fits, and make sure every string is properly closed."
+                if message.stop_reason == "max_tokens" else
+                " Check for things like an unescaped quote or a stray line break inside a string value."
+            )
+            messages += [
+                {"role": "assistant", "content": text},
+                {"role": "user", "content": f"That wasn't valid JSON ({e}).{hint} Resend the COMPLETE, "
+                                             "valid JSON object only -- no explanation, no markdown fences."},
+            ]
 
     raise RuntimeError(
-        f"Claude's reply had no usable text (stop_reason={message.stop_reason!r}). "
-        "If stop_reason is 'max_tokens', the design was cut off -- try again."
+        f"Claude's design reply still wasn't valid JSON after {max_attempts} attempts ({last_error}). "
+        f"The full raw response from every attempt was logged to {LOG_PATH} -- ask about it in "
+        "\"Ask Claude\", or open that file directly."
     )
 
 def save_design(design_json, output_file="design_output.json"):

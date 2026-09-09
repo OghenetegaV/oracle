@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 from config import OUTPUT_JSON_DIR, INPUT_DIR, get_api_key
+from oracle_log import log_event, LOG_PATH
 
 ANTHROPIC_API_KEY = get_api_key()
 
@@ -10,6 +11,17 @@ if not ANTHROPIC_API_KEY:
     print("⚠️  ANTHROPIC_API_KEY not set. Get it from: https://console.anthropic.com/")
     print("   Either set it as an environment variable, or run oracle_wizard.py, "
           "which will ask for it once and save it locally.")
+
+
+def _strip_json_fences(text):
+    text = text.strip()
+    if text.startswith("```json"):
+        text = text[7:]
+    elif text.startswith("```"):
+        text = text[3:]
+    if text.endswith("```"):
+        text = text[:-3]
+    return text.strip()
 
 def load_parsed_geometry(json_file):
     """Load parsed DXF geometry"""
@@ -103,10 +115,15 @@ Be concise. Output ONLY valid JSON, no preamble."""
     
     return prompt
 
-def call_claude(prompt):
-    """Call Claude API to generate GA. Raises on failure instead of printing and
-    returning None -- under the GUI wizard (pythonw, no console) a swallowed
-    print is invisible to everyone, caller included."""
+def call_claude(prompt, max_attempts=3, max_tokens=8000):
+    """Call Claude API to generate GA. Automatically retries with a corrective
+    follow-up if the reply isn't valid JSON -- truncation or a formatting slip
+    is the single most common failure mode for structured LLM output, and not
+    worth surfacing to the user on the first occurrence. Every failed
+    attempt's FULL raw response is logged to logs/oracle.log (not just a
+    short preview), so a persistent failure can actually be diagnosed.
+    Returns raw text that is already confirmed to parse as JSON -- by the
+    time save_ga() sees it, re-parsing is just a formality."""
     import anthropic
 
     if not ANTHROPIC_API_KEY:
@@ -116,27 +133,56 @@ def call_claude(prompt):
         )
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=120.0)
+    messages = [{"role": "user", "content": prompt}]
+    last_error = None
 
-    print("Calling Claude for GA generation...")
+    for attempt in range(1, max_attempts + 1):
+        print(f"Calling Claude for GA generation (attempt {attempt}/{max_attempts})...")
+        try:
+            message = client.messages.create(model="claude-sonnet-5", max_tokens=max_tokens, messages=messages)
+        except Exception as e:
+            log_event("ga.api_error", f"attempt {attempt}/{max_attempts}: {e}")
+            raise RuntimeError(f"Couldn't reach Claude for the layout: {e}") from e
 
-    try:
-        message = client.messages.create(
-            model="claude-sonnet-5",
-            max_tokens=4000,
-            messages=[
-                {"role": "user", "content": prompt}
+        text = next((b.text for b in message.content if hasattr(b, "text") and b.text), None)
+        if not text:
+            last_error = f"empty reply (stop_reason={message.stop_reason!r})"
+            log_event("ga.empty_reply", f"attempt {attempt}/{max_attempts}: stop_reason={message.stop_reason!r}")
+            messages += [
+                {"role": "assistant", "content": "(empty reply)"},
+                {"role": "user", "content": "That reply had no content. Please resend the complete JSON layout."},
             ]
-        )
-    except Exception as e:
-        raise RuntimeError(f"Couldn't reach Claude for the layout: {e}") from e
+            continue
 
-    for block in message.content:
-        if hasattr(block, 'text') and block.text:
-            return block.text
+        cleaned = _strip_json_fences(text)
+        try:
+            json.loads(cleaned)
+            return text
+        except json.JSONDecodeError as e:
+            last_error = e
+            log_event(
+                "ga.invalid_json",
+                f"attempt {attempt}/{max_attempts}, stop_reason={message.stop_reason!r}, error={e}\n"
+                f"FULL RAW RESPONSE:\n{text}",
+            )
+            if attempt == max_attempts:
+                break
+            hint = (
+                " Your reply was cut off before it finished -- keep the summary text brief this time "
+                "so the full JSON fits, and make sure every string is properly closed."
+                if message.stop_reason == "max_tokens" else
+                " Check for things like an unescaped quote or a stray line break inside a string value."
+            )
+            messages += [
+                {"role": "assistant", "content": text},
+                {"role": "user", "content": f"That wasn't valid JSON ({e}).{hint} Resend the COMPLETE, "
+                                             "valid JSON object only -- no explanation, no markdown fences."},
+            ]
 
     raise RuntimeError(
-        f"Claude's reply had no usable text (stop_reason={message.stop_reason!r}). "
-        "If stop_reason is 'max_tokens', the layout was cut off -- try again."
+        f"Claude's layout reply still wasn't valid JSON after {max_attempts} attempts ({last_error}). "
+        f"The full raw response from every attempt was logged to {LOG_PATH} -- ask about it in "
+        "\"Ask Claude\", or open that file directly."
     )
 
 def save_ga(ga_json, output_file="ga_output.json"):

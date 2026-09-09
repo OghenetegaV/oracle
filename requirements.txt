@@ -10,4 +10,5 @@
 ezdxf>=1.4
 anthropic>=0.40
 matplotlib>=3.8
+shapely>=2.0
 pywin32>=306; sys_platform == "win32"
