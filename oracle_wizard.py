@@ -660,8 +660,11 @@ class Wizard(tk.Tk):
         tk.Label(self.content, text="Select your architectural drawing", font=FONT_TITLE,
                  bg=COLOR_BG).pack(anchor="w", pady=(10, 5))
         tk.Label(self.content, bg=COLOR_BG, font=FONT_SUBTITLE, wraplength=700, justify="left",
-                 text="Choose the DXF or DWG file with your walls, columns, and gridlines "
-                      "already drawn (on layers named Walls / Columns / Gridlines).").pack(
+                 text="Two kinds of file work here: a blank architectural plan (walls, columns "
+                      "and gridlines on layers named Walls / Columns / Gridlines, for Oracle to "
+                      "design a layout for), or an already-designed multi-floor structural GA "
+                      "(real beam/column layers per floor, e.g. \"F.F BEAMS\" / \"COLUMN G-1\") "
+                      "-- Oracle detects which one you've given it automatically.").pack(
             anchor="w", pady=(0, 20))
 
         self.selected_file_label = tk.Label(self.content, text="No file selected yet",
@@ -690,18 +693,42 @@ class Wizard(tk.Tk):
 
         def work():
             dxf_name = self._ensure_dxf_in_input_dir(src)
+            dxf_path = INPUT_DIR / dxf_name
+
+            # An already-designed multi-floor GA (real "COLUMN <a>-<b>" / "<level> BEAMS"
+            # layers) is a fundamentally different kind of file from a blank architectural
+            # plan (just Walls/Columns/Gridlines) -- detect which one this is before
+            # picking a parser, rather than forcing every file through the simple path.
+            import re
+            import ezdxf
+            import ga_dxf_parser as gp
+            doc = ezdxf.readfile(str(dxf_path))
+            has_multilevel_pattern = any(
+                re.match(r"^COLUMN\s+\S+-\S+$", l.dxf.name, re.IGNORECASE) for l in doc.layers
+            )
+            if has_multilevel_pattern:
+                levels, beam_layer_by_level, column_layer_by_boundary, issues = gp.detect_levels(doc)
+                return "multilevel_ga", dxf_name, {
+                    "levels": levels, "beam_layer_by_level": beam_layer_by_level,
+                    "column_layer_by_boundary": column_layer_by_boundary, "issues": issues,
+                }
+
             from dxf_parser import DXFParser
             parser = DXFParser(dxf_name)
             geometry = parser.parse_all()
             if geometry is None:
                 raise RuntimeError(f"Couldn't open {dxf_name} -- is it a valid DXF/DWG file?")
             parser.to_json()
-            return dxf_name, geometry
+            return "architectural", dxf_name, geometry
 
         def on_success(payload):
-            dxf_name, geometry = payload
+            kind, dxf_name, detail = payload
             self.data["dxf_filename"] = dxf_name
-            self.data["geometry"] = geometry
+            self.data["dxf_kind"] = kind
+            if kind == "multilevel_ga":
+                self.data["ml_detect"] = detail
+            else:
+                self.data["geometry"] = detail
             self.show_step(2)
 
         self.run_async(work, on_success, busy_message="Reading your drawing...")
@@ -738,6 +765,11 @@ class Wizard(tk.Tk):
     def show_step_2(self):
         self.clear_content()
         self.next_btn.config(text="Looks good, continue →", state="normal")
+
+        if self.data.get("dxf_kind") == "multilevel_ga":
+            self._show_step_2_multilevel()
+            return
+
         geometry = self.data["geometry"]
         if geometry is None:
             tk.Label(self.content, text="Please select a drawing first.", font=FONT_SUBTITLE,
@@ -779,11 +811,52 @@ class Wizard(tk.Tk):
     def advance_step_2(self):
         self.show_step(3)
 
+    def _show_step_2_multilevel(self):
+        # advance_step_2 above handles both branches (Next just moves to Step 3 either
+        # way); this method only builds Step 2's multi-level content.
+        detect = self.data["ml_detect"]
+        tk.Label(self.content, text="Here's the floor sequence we found", font=FONT_TITLE,
+                 bg=COLOR_BG).pack(anchor="w", pady=(10, 15))
+
+        blocking = [i for i in detect["issues"] if i.kind == "blocking"]
+        warnings = [i for i in detect["issues"] if i.kind != "blocking"]
+
+        if detect["levels"]:
+            tk.Label(self.content, font=("Segoe UI", 14, "bold"), bg=COLOR_BG, fg=COLOR_ACCENT,
+                     text=" → ".join(detect["levels"])).pack(anchor="w", pady=(0, 10))
+            for level, layer in detect["beam_layer_by_level"].items():
+                tk.Label(self.content, font=FONT_BODY, bg=COLOR_BG,
+                         text=f"  Floor \"{level}\" beams  →  layer \"{layer}\"").pack(anchor="w")
+            for (lo, hi), layer in detect["column_layer_by_boundary"].items():
+                tk.Label(self.content, font=FONT_BODY, bg=COLOR_BG,
+                         text=f"  Columns {lo}→{hi}  →  layer \"{layer}\"").pack(anchor="w")
+
+        if blocking:
+            msg = "\n".join(f"⚠ {i.message}" for i in blocking)
+            tk.Label(self.content, bg="#fef2f2", fg="#991b1b", font=FONT_BODY, wraplength=680,
+                     justify="left", padx=12, pady=10, text=msg).pack(anchor="w", pady=15, fill="x")
+            self.next_btn.config(state="disabled")
+        elif warnings:
+            msg = "\n".join(f"⚠ {i.message}" for i in warnings)
+            tk.Label(self.content, bg="#fff7ed", fg="#9a3412", font=FONT_BODY, wraplength=680,
+                     justify="left", padx=12, pady=10, text=msg).pack(anchor="w", pady=15, fill="x")
+
+        tk.Label(self.content, font=FONT_SMALL, fg=COLOR_MUTED, bg=COLOR_BG, wraplength=680,
+                 justify="left",
+                 text="This is an already-designed layout, so the next step asks for each "
+                      "floor's storey height, then goes straight to structural analysis -- "
+                      "no AI layout design needed for this kind of file.").pack(anchor="w", pady=(15, 0))
+
     # ================= STEP 3: Questions =================
 
     def show_step_3(self):
         self.clear_content()
         self.next_btn.config(text="Next →", state="normal")
+
+        if self.data.get("dxf_kind") == "multilevel_ga":
+            self._show_step_3_multilevel()
+            return
+
         tk.Label(self.content, text="A few quick questions", font=FONT_TITLE,
                  bg=COLOR_BG).pack(anchor="w", pady=(10, 5))
         tk.Label(self.content, bg=COLOR_BG, font=FONT_SUBTITLE, wraplength=700, justify="left",
@@ -871,6 +944,9 @@ class Wizard(tk.Tk):
             row=notes_row + 2, column=0, columnspan=3, sticky="w")
 
     def advance_step_3(self):
+        if self.data.get("dxf_kind") == "multilevel_ga":
+            self._advance_step_3_multilevel()
+            return
         self.data["storey_height_m"] = round(self.storey_var.get(), 2)
         self.data["occupancy"] = self.occupancy_var.get()
         self.data["slab_thickness_mm"] = int(self.slab_var.get())
@@ -882,11 +958,56 @@ class Wizard(tk.Tk):
         self.data["engineer_notes"] = self.notes_text.get("1.0", "end").strip()
         self.show_step(4)
 
+    def _show_step_3_multilevel(self):
+        detect = self.data["ml_detect"]
+        levels = detect["levels"]
+        tk.Label(self.content, text="Storey heights", font=FONT_TITLE,
+                 bg=COLOR_BG).pack(anchor="w", pady=(10, 5))
+        tk.Label(self.content, bg=COLOR_BG, font=FONT_SUBTITLE, wraplength=700, justify="left",
+                 text="A plan drawing carries no elevation information, so this has to come "
+                      "from you -- one floor-to-floor height per level, ground up.").pack(
+            anchor="w", pady=(0, 15))
+
+        form = tk.Frame(self.content, bg=COLOR_BG)
+        form.pack(anchor="w")
+        self.ml_storey_vars = {}
+        tk.Label(form, text=f"Ground ({levels[0]})", font=FONT_BODY, bg=COLOR_BG).grid(
+            row=0, column=0, sticky="w", pady=6)
+        tk.Label(form, text="= 0.0 m (always the base)", font=FONT_SMALL, bg=COLOR_BG,
+                 fg=COLOR_MUTED).grid(row=0, column=1, sticky="w", padx=10)
+        for i, level in enumerate(levels[1:], start=1):
+            prev = levels[i - 1]
+            tk.Label(form, text=f"{prev} → {level}", font=FONT_BODY, bg=COLOR_BG).grid(
+                row=i, column=0, sticky="w", pady=6)
+            var = tk.DoubleVar(value=self.data.get("ml_storey_heights", {}).get(level, 3.0))
+            tk.Spinbox(form, from_=2.4, to=12.0, increment=0.1, textvariable=var, width=8,
+                       font=FONT_BODY).grid(row=i, column=1, sticky="w", padx=10)
+            tk.Label(form, text="metres, floor-to-floor", font=FONT_SMALL, bg=COLOR_BG,
+                     fg=COLOR_MUTED).grid(row=i, column=2, sticky="w")
+            self.ml_storey_vars[level] = var
+
+    def _advance_step_3_multilevel(self):
+        detect = self.data["ml_detect"]
+        levels = detect["levels"]
+        cumulative = {levels[0]: 0.0}
+        running = 0.0
+        for level in levels[1:]:
+            running += round(self.ml_storey_vars[level].get(), 2)
+            cumulative[level] = running
+        self.data["ml_storey_heights"] = {lv: self.ml_storey_vars[lv].get() for lv in levels[1:]}
+        self.data["ml_cumulative_heights"] = cumulative
+        self.show_step(4)
+
     # ================= STEP 4: Generate GA =================
 
     def show_step_4(self):
         self.clear_content()
         self.next_btn.config(text="Next →", state="disabled")
+
+        if self.data.get("dxf_kind") == "multilevel_ga":
+            self._show_step_4_multilevel()
+            return
+
         if self.data["geometry"] is None:
             self._show_out_of_order_message()
             return
@@ -971,11 +1092,86 @@ class Wizard(tk.Tk):
     def advance_step_4(self):
         self.show_step(5)
 
+    def _show_step_4_multilevel(self):
+        tk.Label(self.content, text="Building your structural model", font=FONT_TITLE,
+                 bg=COLOR_BG).pack(anchor="w", pady=(10, 5))
+        tk.Label(self.content, bg=COLOR_BG, font=FONT_SUBTITLE, wraplength=700, justify="left",
+                 text="Extracting joints and members from your drawing's geometry and finding "
+                      "the slab panels on each floor. This is deterministic (no AI involved) "
+                      "since your layout is already designed.").pack(anchor="w", pady=(0, 20))
+        self.ml_build_frame = tk.Frame(self.content, bg=COLOR_BG)
+        self.ml_build_frame.pack(anchor="w", fill="both", expand=True)
+        self._build_multilevel_model()
+
+    def _build_multilevel_model(self):
+        def work():
+            import ga_dxf_parser as gp
+            dxf_path = INPUT_DIR / self.data["dxf_filename"]
+            return gp.parse_multilevel_ga(
+                str(dxf_path), storey_heights_m=self.data["ml_cumulative_heights"],
+            )
+
+        def on_success(result):
+            self.data["ml_result"] = result
+            for w in self.ml_build_frame.winfo_children():
+                w.destroy()
+
+            blocking = [i for i in result["issues"] if i.kind == "blocking"]
+            warnings = [i for i in result["issues"] if i.kind != "blocking"]
+
+            if blocking or "model" not in result:
+                msg = "\n".join(f"⚠ {i.message}" for i in blocking) or "The model couldn't be built."
+                tk.Label(self.ml_build_frame, bg="#fef2f2", fg="#991b1b", font=FONT_BODY,
+                         wraplength=680, justify="left", padx=12, pady=10, text=msg).pack(
+                    anchor="w", fill="x")
+                tk.Button(self.ml_build_frame, text="Back to storey heights",
+                          command=lambda: self.show_step(3), relief="flat", padx=12, pady=6).pack(
+                    anchor="w", pady=10)
+                return
+
+            model = result["model"]
+            row = tk.Frame(self.ml_build_frame, bg=COLOR_BG)
+            row.pack(anchor="w", pady=6)
+            for label, count in [("Joints", len(model["joints"].coordinates())),
+                                  ("Members", len(model["members"])),
+                                  ("Slab panels", sum(len(p) for p in model["slab_panels"].values()))]:
+                col = tk.Frame(row, bg=COLOR_BG)
+                col.pack(side="left", padx=(0, 30))
+                tk.Label(col, text=f"{count}", font=("Segoe UI", 16, "bold"), bg=COLOR_BG,
+                         fg=COLOR_ACCENT).pack()
+                tk.Label(col, text=label, font=FONT_BODY, bg=COLOR_BG).pack()
+
+            if warnings:
+                msg = "\n".join(f"⚠ {i.message}" for i in warnings)
+                tk.Label(self.ml_build_frame, bg="#fff7ed", fg="#9a3412", font=FONT_BODY,
+                         wraplength=680, justify="left", padx=12, pady=10, text=msg).pack(
+                    anchor="w", pady=15, fill="x")
+
+            tk.Label(self.ml_build_frame, font=FONT_SMALL, fg=COLOR_MUTED, bg=COLOR_BG,
+                     wraplength=680, justify="left",
+                     text="Standard initial member sizes were used (225x225 columns, 225x450 "
+                          "beams, 225x300 roof beams, 150mm slabs, C25/30 concrete) -- these are "
+                          "a starting point for analysis, not a final design.").pack(
+                anchor="w", pady=(10, 0))
+            self.next_btn.config(state="normal")
+
+        def on_error(exc, tb):
+            self.default_error_handler(exc, tb)
+            tk.Button(self.ml_build_frame, text="Try again", command=self._build_multilevel_model,
+                      bg=COLOR_ACCENT, fg="white", relief="flat", padx=14, pady=6).pack(anchor="w", pady=10)
+
+        self.run_async(work, on_success, on_error, busy_message="Building the model...")
+
     # ================= STEP 5: Structural analysis =================
 
     def show_step_5(self):
         self.clear_content()
         self.next_btn.config(text="Next →", state="disabled")
+
+        if self.data.get("dxf_kind") == "multilevel_ga":
+            self._show_step_5_multilevel()
+            return
+
         tk.Label(self.content, text="Structural analysis", font=FONT_TITLE,
                  bg=COLOR_BG).pack(anchor="w", pady=(10, 5))
         tk.Label(
@@ -1061,6 +1257,66 @@ class Wizard(tk.Tk):
 
     def advance_step_5(self):
         self.show_step(6)
+
+    def _show_step_5_multilevel(self):
+        tk.Label(self.content, text="Structural analysis", font=FONT_TITLE,
+                 bg=COLOR_BG).pack(anchor="w", pady=(10, 5))
+        if "model" not in self.data.get("ml_result", {}):
+            self._show_out_of_order_message()
+            return
+        tk.Label(
+            self.content, bg=COLOR_BG, font=FONT_SUBTITLE, wraplength=700, justify="left",
+            text="This model needs STAAD.Pro -- it's a real multi-floor building with plate "
+                 "slab elements, which the quick built-in estimate doesn't support. Make sure "
+                 "STAAD.Pro V8i SS6 is open, then run the analysis."
+        ).pack(anchor="w", pady=(0, 20))
+
+        tk.Button(self.content, text="Run analysis in STAAD.Pro", command=self._run_multilevel_analysis,
+                  bg=COLOR_ACCENT, fg="white", relief="flat", padx=14, pady=10,
+                  cursor="hand2").pack(anchor="w")
+
+        self.ml_analysis_frame = tk.Frame(self.content, bg=COLOR_BG)
+        self.ml_analysis_frame.pack(anchor="w", fill="both", expand=True, pady=20)
+
+    def _run_multilevel_analysis(self):
+        def work():
+            import staad_v8i_integration as sv
+            sv.STD_PATH.write_text(self.data["ml_result"]["std_text"])
+            # The wizard process itself may be 64-bit; STAAD's OpenSTAAD COM automation
+            # is 32-bit only, so this has to run in the dedicated 32-bit subprocess (same
+            # mechanism sv.run() uses for the single-floor path), not in-process here.
+            sv.run_subprocess_step("analyze")
+            return sv.ANL_PATH
+
+        def on_success(anl_path):
+            for w in self.ml_analysis_frame.winfo_children():
+                w.destroy()
+            tk.Label(self.ml_analysis_frame, text="✓ Analysis complete", font=FONT_SUBTITLE,
+                     bg=COLOR_BG, fg="#166534").pack(anchor="w")
+            tk.Label(self.ml_analysis_frame,
+                     text=f"Model file: {sys.modules['staad_v8i_integration'].STD_PATH}\n"
+                          f"Full results: {anl_path}",
+                     font=FONT_BODY, bg=COLOR_BG, wraplength=680, justify="left").pack(anchor="w", pady=8)
+            tk.Label(
+                self.ml_analysis_frame, font=FONT_SMALL, fg=COLOR_MUTED, bg=COLOR_BG,
+                wraplength=680, justify="left",
+                text="Automated design and detail-drawing generation for multi-floor buildings "
+                     "isn't wired up yet -- open the results file above to review reactions and "
+                     "member forces directly, or ask Claude about them."
+            ).pack(anchor="w", pady=(5, 15))
+            tk.Button(self.ml_analysis_frame, text="Open results folder",
+                      command=lambda: os.startfile(anl_path.parent),
+                      bg=COLOR_ACCENT, fg="white", relief="flat", padx=14, pady=8,
+                      cursor="hand2").pack(anchor="w")
+            self.next_btn.config(state="normal", text="Start a new project", command=self._restart)
+
+        def on_error(exc, tb):
+            self.default_error_handler(exc, tb)
+            tk.Button(self.ml_analysis_frame, text="Try again", command=self._run_multilevel_analysis,
+                      bg=COLOR_ACCENT, fg="white", relief="flat", padx=14, pady=6).pack(anchor="w", pady=10)
+
+        self.run_async(work, on_success, on_error,
+                        busy_message="Running the analysis in STAAD.Pro (this can take a couple of minutes)...")
 
     # ================= STEP 6: Element design =================
 
